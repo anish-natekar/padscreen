@@ -90,7 +90,7 @@ To stop it starting at login: `systemctl --user disable --now padscreen`.
 |---|---|
 | Preset | One tap for common combinations: *Sharp, large UI*, *Sharp, small UI*, *Fast*, *Battery*. |
 | Resolution | 25–100 % of the iPad's pixels. Lower is lighter on the encoder and the cable. Restarts the stream. |
-| UI size | 1×, 2× or 3× scale of the virtual monitor, so menus and text are the size you want. Applies live. |
+| UI size | 1× or 2× scale of the virtual monitor, so menus and text are the size you want. Applies live. |
 | Position | Which side of the laptop screen the iPad sits on. Applies live. |
 | Speed vs quality | `latency` (smallest buffers), `balanced`, `quality` (highest bitrate), `saver` (30 fps, low bitrate). Restarts the stream. |
 | Stats | Shows or hides the overlay at the top left (fps, bitrate, latency). Tap the overlay to hide it. |
@@ -133,7 +133,7 @@ seconds, so run them in a session where you have saved your work. Architecture n
 - GNOME on Wayland is the supported path (it relies on Mutter's ScreenCast and RemoteDesktop D-Bus APIs).
   KDE and wlroots compositors are not supported.
 - No audio, no keyboard passthrough, no Pencil pressure or tilt yet.
-- Fractional UI scaling needs a GNOME experimental feature and is not used; scales are 1×, 2×, 3×.
+- Fractional UI scaling needs a GNOME experimental feature and is not used; scales are 1× and 2×.
 - Changing the resolution or the speed profile restarts the stream.
 - One iPad at a time is the intended use. A second client shares the same stream and the same virtual monitor,
   and both can send input.

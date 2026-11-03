@@ -72,7 +72,7 @@ impl Overrides {
 pub struct Settings {
     /// Fraction of the client's device pixels that is streamed (0.25..=1).
     pub res: f32,
-    /// Integer UI scale of the virtual monitor (1..=3). Wayland only.
+    /// Integer UI scale of the virtual monitor (1..=2). Wayland only.
     pub ui: u32,
     pub profile: Profile,
     /// Which side of the laptop screen the virtual monitor sits on. Wayland only.
@@ -101,7 +101,7 @@ impl Patch {
                 .as_f64()
                 .filter(|r| r.is_finite())
                 .map(|r| (r as f32).clamp(0.25, 1.0)),
-            ui: v["ui"].as_u64().map(|u| (u as u32).clamp(1, 3)),
+            ui: v["ui"].as_u64().map(|u| (u as u32).clamp(1, 2)),
             profile: v["profile"].as_str().and_then(Profile::parse),
             place: v["place"].as_str().and_then(Placement::parse),
         };
@@ -163,12 +163,12 @@ mod tests {
                 ..D
             }
         );
-        let p = Patch::parse(r#"{"type":"hello","pw":2160,"ph":1620,"res":0.75,"ui":3,"profile":"saver","place":"left"}"#).unwrap();
+        let p = Patch::parse(r#"{"type":"hello","pw":2160,"ph":1620,"res":0.75,"ui":2,"profile":"saver","place":"left"}"#).unwrap();
         assert_eq!(
             D.with(p),
             Settings {
                 res: 0.75,
-                ui: 3,
+                ui: 2,
                 profile: Profile::Saver,
                 place: Placement::Left
             }
@@ -210,7 +210,7 @@ mod tests {
             D.with(Patch::parse(r#"{"type":"settings","res":0,"ui":99}"#).unwrap()),
             Settings {
                 res: 0.25,
-                ui: 3,
+                ui: 2,
                 ..D
             }
         );

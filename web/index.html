@@ -92,7 +92,7 @@ function renderPanel() {
   row([[1, '100%', '2160 px wide'], [0.75, '75%', 'less to encode'], [0.5, '50%', 'fastest']].map(([v, t, sub]) => ({t, sub, go: choose('res', v), on: eff('res') != null && same(eff('res'), v)})));
   if (caps.arrange) {
     h('UI size');
-    row([[1, '1×', 'small'], [2, '2×', 'large'], [3, '3×', 'largest']].map(([v, t, sub]) => ({t, sub, go: choose('ui', v), on: eff('ui') === v})));
+    row([[1, '1×', 'small'], [2, '2×', 'large']].map(([v, t, sub]) => ({t, sub, go: choose('ui', v), on: eff('ui') === v})));
     h('iPad is … the laptop screen');
     row([['left', '◀ Left'], ['above', '▲ Above'], ['below', '▼ Below'], ['right', '▶ Right']].map(([v, t]) => ({t, go: choose('place', v), on: eff('place') === v})));
   }

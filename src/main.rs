@@ -56,8 +56,8 @@ struct ServeArgs {
     /// Default fraction of the client's device pixels that is streamed (clients can change it).
     #[arg(long, default_value_t = 1.0, alias = "scale", env = "PADSCREEN_RES")]
     res: f32,
-    /// Default UI scale of the virtual monitor, 1 to 3 (Wayland; clients can change it). 2 suits a 264 ppi iPad.
-    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(1..=3), env = "PADSCREEN_UI_SCALE")]
+    /// Default UI scale of the virtual monitor, 1 or 2 (Wayland; clients can change it). 2 suits a 264 ppi iPad.
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(1..=2), env = "PADSCREEN_UI_SCALE")]
     ui_scale: u32,
     /// Default fps / latency / quality trade-off (clients can change it).
     #[arg(
