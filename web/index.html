@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>padscreen</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
+  canvas{position:fixed;inset:0;width:100vw;height:100vh;object-fit:contain;background:#000}
+  #hud{position:fixed;left:8px;top:8px;padding:6px 8px;font:12px/1.35 ui-monospace,Menlo,monospace;color:#9f9;background:rgba(0,0,0,.6);border-radius:6px;white-space:pre;z-index:2}
+  #fs{position:fixed;right:10px;top:10px;width:44px;height:44px;border:0;border-radius:10px;background:rgba(40,40,40,.55);color:#ddd;font:22px system-ui;z-index:3}
+  #tb{position:fixed;right:64px;top:10px;width:44px;height:44px;border:0;border-radius:10px;background:rgba(40,40,40,.55);color:#ddd;font:22px system-ui;z-index:3;display:none}
+  #tb.off{opacity:.45}
+  #gear{position:fixed;right:118px;top:10px;width:44px;height:44px;border:0;border-radius:10px;background:rgba(40,40,40,.55);color:#ddd;font:22px system-ui;z-index:3}
+  #sp{position:fixed;right:10px;top:64px;width:min(380px,92vw);max-height:calc(100vh - 80px);overflow:auto;padding:12px;border-radius:12px;background:rgba(24,24,24,.94);color:#ddd;font:14px/1.3 system-ui;z-index:4;display:none;-webkit-overflow-scrolling:touch}
+  #sp h4{margin:12px 0 6px;font:600 12px system-ui;color:#888;text-transform:uppercase;letter-spacing:.06em}
+  #sp h4:first-child{margin-top:0}
+  #sp .row{display:flex;gap:6px;flex-wrap:wrap}
+  #sp button{flex:1 1 0;min-width:70px;padding:9px 6px;border:1px solid #444;border-radius:8px;background:#2a2a2a;color:#ddd;font:14px system-ui}
+  #sp button small{display:block;color:#999;font-size:11px;margin-top:2px}
+  #sp button.on{background:#2d5a9a;border-color:#4f8ad8;color:#fff}
+  #sp button.on small{color:#cde}
+  #sp p{margin:10px 0 0;color:#777;font-size:12px}
+  #msg{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#888;font:18px system-ui;z-index:1}
+</style></head>
+<body>
+<div id="msg">connecting…</div>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<button id="fs" title="Full screen">⛶</button>
+<button id="tb" title="Touch control on/off">☝</button>
+<button id="gear" title="Display settings">⚙</button>
+<div id="sp"></div>
+<script>
+"use strict";
+const canvas = document.getElementById('c'), ctx = canvas.getContext('2d', {alpha:false, desynchronized:true});
+const hud = document.getElementById('hud'), msg = document.getElementById('msg');
+const MAX_DECODE_QUEUE = 30;
+let ws, decoder, cfg, latest = null, drawQueued = false, seq = 0, needKey = true;
+const diag = {errors:0, lastErr:'', reconnects:0, lastClose:''};
+const inflight = new Map();           // decoder timestamp -> {recv, srv}
+const st = {frames:0, bytes:0, drawn:0, dropped:0, lat:[], decMs:[]};
+let hudOn = true;
+hud.addEventListener('pointerdown', e => { setStats(false); e.stopPropagation(); });
+function setStats(on) { hudOn = on; hud.style.display = on ? '' : 'none'; S.stats = on; saveS(); renderPanel(); }
+
+// ---- settings: chosen on this iPad, kept in localStorage, sent to the server with every hello ----
+// null = "whatever the server defaults to"; the server's defaults arrive in caps and are shown meanwhile.
+const S = {res: null, ui: null, profile: null, place: null, stats: true};
+try { Object.assign(S, JSON.parse(localStorage.getItem('ps.settings') || '{}')); } catch(e){}
+const saveS = () => { try { localStorage.setItem('ps.settings', JSON.stringify(S)); } catch(e){} };
+let caps = {};
+const wire = () => { const o = {}; for (const k of ['res', 'ui', 'profile', 'place']) if (S[k] != null) o[k] = S[k]; return o; };
+const eff = k => S[k] != null ? S[k] : (caps.settings || {})[k];
+function pushSettings() { if (ws && ws.readyState === 1) ws.send(JSON.stringify({type:'settings', ...wire()})); renderPanel(); }
+hudOn = S.stats !== false; hud.style.display = hudOn ? '' : 'none';
+
+const PRESETS = [
+  {t: 'Sharp, large UI', sub: 'full res · 2×', v: {res: 1, ui: 2, profile: 'balanced'}},
+  {t: 'Sharp, small UI', sub: 'full res · 1×', v: {res: 1, ui: 1, profile: 'balanced'}},
+  {t: 'Fast', sub: 'half res · low latency', v: {res: 0.5, ui: 1, profile: 'latency'}},
+  {t: 'Battery', sub: '75% · 30 fps', v: {res: 0.75, ui: 1, profile: 'saver'}},
+];
+const sp = document.getElementById('sp'), gear = document.getElementById('gear');
+for (const el of [sp, gear]) for (const ev of ['pointerdown', 'pointerup', 'pointermove', 'pointercancel']) el.addEventListener(ev, e => e.stopPropagation());
+gear.addEventListener('click', e => { e.stopPropagation(); sp.style.display = sp.style.display === 'block' ? 'none' : 'block'; renderPanel(); });
+
+function renderPanel() {
+  if (sp.style.display !== 'block') return;
+  sp.textContent = '';
+  const h = t => { const e = document.createElement('h4'); e.textContent = t; sp.appendChild(e); };
+  const row = items => {
+    const r = document.createElement('div'); r.className = 'row';
+    for (const it of items) {
+      const b = document.createElement('button'); b.textContent = it.t;
+      if (it.sub) { const sm = document.createElement('small'); sm.textContent = it.sub; b.appendChild(sm); }
+      if (it.on) b.className = 'on';
+      b.addEventListener('click', e => { e.stopPropagation(); it.go(); });
+      r.appendChild(b);
+    }
+    sp.appendChild(r);
+  };
+  const choose = (k, v) => () => { S[k] = v; saveS(); pushSettings(); };
+  const same = (a, b) => typeof a === 'number' ? Math.abs(a - b) < 1e-6 : a === b;
+
+  h('Presets');
+  row(PRESETS.map(p => ({t: p.t, sub: p.sub, go: () => { Object.assign(S, p.v); saveS(); pushSettings(); },
+                         on: Object.keys(p.v).every(k => eff(k) != null && same(eff(k), p.v[k]))})));
+  h('Resolution (share of the iPad\'s pixels)');
+  row([[1, '100%', '2160 px wide'], [0.75, '75%', 'less to encode'], [0.5, '50%', 'fastest']].map(([v, t, sub]) => ({t, sub, go: choose('res', v), on: eff('res') != null && same(eff('res'), v)})));
+  if (caps.arrange) {
+    h('UI size');
+    row([[1, '1×', 'small'], [2, '2×', 'large'], [3, '3×', 'largest']].map(([v, t, sub]) => ({t, sub, go: choose('ui', v), on: eff('ui') === v})));
+    h('iPad is … the laptop screen');
+    row([['left', '◀ Left'], ['above', '▲ Above'], ['below', '▼ Below'], ['right', '▶ Right']].map(([v, t]) => ({t, go: choose('place', v), on: eff('place') === v})));
+  }
+  h('Speed vs quality');
+  const pr = caps.profiles || {}, names = {latency: 'Low latency', balanced: 'Balanced', quality: 'Quality', saver: 'Saver'};
+  row(['latency', 'balanced', 'quality', 'saver'].filter(k => pr[k]).map(k => ({t: names[k], sub: `${pr[k].fps} fps · ${pr[k].kbps / 1000} Mbps`, go: choose('profile', k), on: eff('profile') === k})));
+  h('Stats overlay');
+  row([{t: 'Show', go: () => setStats(true), on: hudOn}, {t: 'Hide', go: () => setStats(false), on: !hudOn}]);
+  const p = document.createElement('p'); p.textContent = 'Resolution and speed changes restart the stream for a moment. Windows on the iPad return to the laptop screen while it restarts.'; sp.appendChild(p);
+}
+
+function sendDiag(k, v){ try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({type:'diag', k, v, t:Math.round(performance.now())})); } catch(e){} }
+function b64(s){ const b = atob(s), u = new Uint8Array(b.length); for (let i=0;i<b.length;i++) u[i]=b.charCodeAt(i); return u; }
+
+function setupDecoder(c) {
+  if (decoder && decoder.state !== 'closed') try { decoder.close(); } catch(e){}
+  inflight.clear();
+  decoder = new VideoDecoder({
+    output: f => {
+      const rec = inflight.get(f.timestamp); inflight.delete(f.timestamp);
+      if (rec) st.decMs.push(performance.now() - rec.recv);
+      if (latest) { latest.close(); st.dropped++; }
+      latest = f;
+      if (!drawQueued) { drawQueued = true; requestAnimationFrame(draw); }
+    },
+    error: e => {
+      diag.errors++; diag.lastErr = e.name + ': ' + e.message; console.error(e);
+      sendDiag('decoder-error', diag.lastErr);
+      // recover: rebuild the decoder and wait for the next keyframe
+      if (cfg) setupDecoder(cfg);
+    }
+  });
+  needKey = true;
+  decoder.configure({codec: c.codec, description: b64(c.description), optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware'});
+  if (canvas.width !== c.width || canvas.height !== c.height) { canvas.width = c.width; canvas.height = c.height; }
+}
+
+function draw() {
+  drawQueued = false;
+  if (!latest) return;
+  ctx.drawImage(latest, 0, 0, canvas.width, canvas.height);
+  latest.close(); latest = null; st.drawn++;
+  msg.style.display = 'none';
+}
+
+// Stream size = the iPad's native screen in its current orientation. The Safari toolbar changes the
+// viewport height constantly; following it would make the laptop reconfigure its monitor over and over.
+const landscape = () => innerWidth >= innerHeight;
+function viewport() {
+  const a = Math.max(screen.width, screen.height), b = Math.min(screen.width, screen.height), d = devicePixelRatio;
+  return landscape() ? {pw: Math.round(a * d), ph: Math.round(b * d)} : {pw: Math.round(b * d), ph: Math.round(a * d)};
+}
+let resizeTimer = 0, sentLandscape = null;
+function onResize() {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (landscape() === sentLandscape || !ws || ws.readyState !== 1) return;
+    sentLandscape = landscape();
+    ws.send(JSON.stringify({type:'resize', ...viewport()}));
+  }, 500);
+}
+addEventListener('resize', onResize);
+addEventListener('orientationchange', onResize);
+
+const fsBtn = document.getElementById('fs'), root = document.documentElement;
+const fsOn = () => document.fullscreenElement || document.webkitFullscreenElement;
+fsBtn.addEventListener('click', e => {
+  e.stopPropagation();
+  if (fsOn()) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  else (root.requestFullscreen || root.webkitRequestFullscreen).call(root);
+});
+if (!(root.requestFullscreen || root.webkitRequestFullscreen) || navigator.standalone) fsBtn.style.display = 'none';
+
+// ---- input: touch/pen/mouse -> normalised pointer events ----------------------------------------
+let inputOk = false, touchOn = true;
+const tb = document.getElementById('tb');
+try { touchOn = localStorage.getItem('touchOn') !== '0'; } catch(e){}
+function paintTb(){ tb.classList.toggle('off', !touchOn); }
+paintTb();
+for (const b of [fsBtn, tb, hud, gear]) b.addEventListener('pointerdown', e => e.stopPropagation());
+tb.addEventListener('click', e => { e.stopPropagation(); touchOn = !touchOn; paintTb(); releaseAll(); try { localStorage.setItem('touchOn', touchOn ? '1' : '0'); } catch(e){} });
+
+const SLOP = 8, LONG_MS = 500, NOTCH_PX = 32;
+const send = o => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); };
+function norm(cx, cy) {
+  const cw = canvas.width || 1, ch = canvas.height || 1, s = Math.min(innerWidth / cw, innerHeight / ch);
+  const w = cw * s, h = ch * s, ox = (innerWidth - w) / 2, oy = (innerHeight - h) / 2;
+  return {x: (cx - ox) / w, y: (cy - oy) / h};
+}
+const ptr = (e, n) => ({type:'in', e: n, ...norm(e.clientX, e.clientY)});
+let moveQ = null;
+function queueMove(o) { moveQ = o; requestAnimationFrame(flushMove); }
+function flushMove() { if (moveQ) { send(moveQ); moveQ = null; } }
+const btn = e => e.button === 2 ? 3 : e.button === 1 ? 2 : 1;
+
+const touches = new Map();            // pointerId -> {x, y}
+let g = null;                         // single-finger gesture: {id, x0, y0, x, y, state: pending|drag|long, timer}
+let scroll = null;                    // two-finger scroll: last centroid {x, y}
+let held = false;                     // a mouse button is down
+
+// Native touch (server says caps.touch): every finger and the Pencil is a real touch point; mouse stays a pointer.
+let nativeTouch = false;
+const slots = new Map();              // pointerId -> touch slot the server knows it by
+const tq = new Map();                 // slot -> latest unsent move
+const isTouch = e => nativeTouch && e.pointerType !== 'mouse';
+function tDown(e) {
+  let s = 0; const used = new Set(slots.values()); while (used.has(s)) s++;
+  if (s >= 16) return;
+  slots.set(e.pointerId, s); send({type:'in', e:'td', id:s, ...norm(e.clientX, e.clientY)});
+}
+function tMove(e) {
+  const s = slots.get(e.pointerId); if (s === undefined) return;   // pen hover has no slot
+  tq.set(s, {type:'in', e:'tm', id:s, ...norm(e.clientX, e.clientY)}); requestAnimationFrame(flushTouch);
+}
+function flushTouch() { for (const o of tq.values()) send(o); tq.clear(); }
+function tUp(e) {
+  const s = slots.get(e.pointerId); if (s === undefined) return;
+  flushTouch(); slots.delete(e.pointerId); send({type:'in', e:'tu', id:s});
+}
+
+function releaseAll() {
+  tq.clear(); for (const s of slots.values()) send({type:'in', e:'tu', id:s}); slots.clear();
+  if (g) { clearTimeout(g.timer); if (g.state === 'drag') send({type:'in', e:'up', b:1, ...norm(g.x, g.y)}); g = null; }
+  scroll = null; touches.clear(); moveQ = null;
+}
+const centroid = () => { let x = 0, y = 0; for (const t of touches.values()) { x += t.x; y += t.y; } return {x: x / touches.size, y: y / touches.size}; };
+
+addEventListener('pointerdown', e => {
+  if (!inputOk || !touchOn) return;
+  if (isTouch(e)) return tDown(e);
+  if (e.pointerType !== 'touch') { held = true; flushMove(); send({...ptr(e, 'down'), b: btn(e)}); try { canvas.setPointerCapture(e.pointerId); } catch(_){} return; }
+  touches.set(e.pointerId, {x: e.clientX, y: e.clientY});
+  if (touches.size === 1) {
+    g = {id: e.pointerId, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, state: 'pending'};
+    g.timer = setTimeout(() => { if (g && g.state === 'pending') g.state = 'long'; }, LONG_MS);
+  } else if (touches.size === 2) {
+    if (g) { clearTimeout(g.timer); if (g.state === 'drag') send({type:'in', e:'up', b:1, ...norm(g.x, g.y)}); g = null; }
+    scroll = centroid();
+  }
+});
+
+addEventListener('pointermove', e => {
+  if (!inputOk || !touchOn) return;
+  if (isTouch(e)) return tMove(e);
+  if (e.pointerType !== 'touch') { queueMove(ptr(e, 'move')); return; }
+  const t = touches.get(e.pointerId); if (!t) return;
+  t.x = e.clientX; t.y = e.clientY;
+  if (scroll && touches.size >= 2) {
+    const c = centroid();
+    // content follows the fingers: fingers up -> wheel down
+    send({type:'in', e:'scroll', dx: -(c.x - scroll.x) / NOTCH_PX, dy: -(c.y - scroll.y) / NOTCH_PX});
+    scroll = c; return;
+  }
+  if (!g || g.id !== e.pointerId) return;
+  g.x = e.clientX; g.y = e.clientY;
+  if (g.state === 'pending' && Math.hypot(g.x - g.x0, g.y - g.y0) > SLOP) {
+    clearTimeout(g.timer); g.state = 'drag';
+    send({type:'in', e:'move', ...norm(g.x0, g.y0)}); send({type:'in', e:'down', b:1, ...norm(g.x0, g.y0)});
+  }
+  if (g.state === 'drag') queueMove({type:'in', e:'move', ...norm(g.x, g.y)});
+});
+
+function endPointer(e, cancelled) {
+  if (isTouch(e)) return tUp(e);
+  if (e.pointerType !== 'touch') {
+    if (held) { held = false; flushMove(); send({...ptr(e, 'up'), b: btn(e)}); }
+    return;
+  }
+  if (!touches.delete(e.pointerId)) return;
+  if (touches.size < 2) scroll = null;
+  if (g && g.id === e.pointerId) {
+    clearTimeout(g.timer); flushMove();
+    const p = norm(g.x, g.y);
+    if (g.state === 'drag') send({type:'in', e:'up', b:1, ...p});
+    else if (!cancelled) {
+      const b = g.state === 'long' ? 3 : 1;
+      send({type:'in', e:'move', ...p}); send({type:'in', e:'down', b, ...p}); send({type:'in', e:'up', b, ...p});
+    }
+    g = null;
+  }
+}
+addEventListener('pointerup', e => endPointer(e, false));
+addEventListener('pointercancel', e => endPointer(e, true));
+addEventListener('contextmenu', e => e.preventDefault());
+
+function connect() {
+  ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { sentLandscape = landscape(); ws.send(JSON.stringify({type:'hello', ...viewport(), ...wire(), w:screen.width, h:screen.height, dpr:devicePixelRatio})); };
+  ws.onmessage = ev => {
+    if (typeof ev.data === 'string') {
+      const m = JSON.parse(ev.data);
+      if (m.type === 'config') { cfg = m; setupDecoder(cfg); }
+      else if (m.type === 'caps') { inputOk = !!m.input; nativeTouch = inputOk && !!m.touch; caps = m; renderPanel(); slots.clear(); tq.clear(); tb.style.display = inputOk ? 'block' : 'none'; }
+      return;
+    }
+    if (!decoder || decoder.state !== 'configured') return;
+    const dv = new DataView(ev.data), key = (dv.getUint8(0) & 1) === 1;
+    if (needKey && !key) return;
+    // A decoder that cannot keep up would buffer without bound: drop to the next keyframe instead.
+    if (!key && decoder.decodeQueueSize > MAX_DECODE_QUEUE) { needKey = true; return; }
+    needKey = false;
+    const srv = Number(dv.getBigUint64(1));
+    const ts = seq++ * 1000;
+    inflight.set(ts, {recv: performance.now(), srv});
+    st.frames++; st.bytes += ev.data.byteLength;
+    try { decoder.decode(new EncodedVideoChunk({type: key ? 'key' : 'delta', timestamp: ts, data: new Uint8Array(ev.data, 9)})); }
+    catch (e) { diag.errors++; diag.lastErr = 'decode(): ' + e.message; sendDiag('decode-throw', e.message); if (cfg) setupDecoder(cfg); }
+  };
+  ws.onclose = ev => {
+    diag.reconnects++; diag.lastClose = ev.code + (ev.reason ? ' ' + ev.reason : '');
+    if (latest) { latest.close(); latest = null; }
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    msg.style.display = 'flex'; msg.textContent = 'disconnected, retrying…'; setTimeout(connect, 700);
+  };
+  ws.onerror = () => ws.close();
+}
+
+let last = performance.now(), l = {frames:0, bytes:0, drawn:0, dropped:0};
+setInterval(() => {
+  const now = performance.now(), dt = (now - last) / 1000; last = now;
+  const dm = st.decMs.splice(0), avg = dm.length ? dm.reduce((a,b)=>a+b,0)/dm.length : 0, mx = dm.length ? Math.max(...dm) : 0;
+  const t = `rx ${((st.frames-l.frames)/dt).toFixed(0)} fps  draw ${((st.drawn-l.drawn)/dt).toFixed(0)} fps\n` +
+            `${((st.bytes-l.bytes)*8/dt/1e6).toFixed(1)} Mbps  skipped ${st.dropped-l.dropped}/s\n` +
+            `recv→decoded avg ${avg.toFixed(1)} max ${mx.toFixed(1)} ms  q ${decoder ? decoder.decodeQueueSize : 0}\n` +
+            `${cfg ? cfg.codec + ' ' + cfg.width + 'x' + cfg.height : ''}\n` +
+            `err ${diag.errors} reconn ${diag.reconnects}${diag.lastErr ? '\nlast err: ' + diag.lastErr : ''}${diag.lastClose ? '\nlast close: ' + diag.lastClose : ''}`;
+  if (hudOn) hud.textContent = t;
+  l = {frames:st.frames, bytes:st.bytes, drawn:st.drawn, dropped:st.dropped};
+}, 1000);
+
+if (typeof VideoDecoder === 'undefined') msg.textContent = 'WebCodecs unavailable (need HTTPS + trusted cert)'; else connect();
+</script></body></html>

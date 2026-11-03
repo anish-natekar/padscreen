@@ -1,0 +1,20 @@
+[Unit]
+Description=padscreen: iPad as an extended monitor
+# Needs the GNOME session (mutter on the session bus) and PipeWire.
+After=graphical-session.target pipewire.service
+PartOf=graphical-session.target
+Requisite=graphical-session.target
+
+[Service]
+Type=simple
+# Settings come from ~/.config/padscreen/padscreen.env (see .env.example); certificates from the same directory.
+ExecStart=%h/.local/bin/padscreen serve
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=3
+# the virtual monitor and capture children go away with the service
+KillMode=control-group
+TimeoutStopSec=5
+
+[Install]
+WantedBy=graphical-session.target

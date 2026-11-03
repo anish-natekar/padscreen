@@ -1,0 +1,16 @@
+/target
+
+# personal configuration and anything secret
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.csr
+*.srl
+*.p12
+*.mobileconfig
+
+# local scratch: early experiments, including a private CA and logs from one machine
+/spikes/
+*.log

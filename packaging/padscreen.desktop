@@ -1,0 +1,22 @@
+[Desktop Entry]
+Type=Application
+Name=padscreen
+GenericName=iPad second screen
+Comment=Use the iPad as an extended monitor over USB-C
+Exec=padscreenctl open
+Icon=padscreen
+Terminal=false
+Categories=Utility;
+Actions=Stop;Restart;Status;
+
+[Desktop Action Stop]
+Name=Stop
+Exec=padscreenctl stop
+
+[Desktop Action Restart]
+Name=Restart
+Exec=padscreenctl restart
+
+[Desktop Action Status]
+Name=Show status and iPad URL
+Exec=padscreenctl status

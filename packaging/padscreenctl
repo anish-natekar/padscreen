@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Control the padscreen user service and tell the user where to point the iPad.
+# usage: padscreenctl open|start|stop|restart|status
+set -euo pipefail
+svc=padscreen.service
+port=8443
+
+urls() {
+  ip -o -4 addr show 2>/dev/null | awk '{split($4, a, "/"); print a[1]}' | grep '^10\.42\.' | sed "s|.*|https://&:$port/|"
+}
+
+say() { # title, body
+  echo "$1: $2"
+  if command -v notify-send >/dev/null; then notify-send -a padscreen -i padscreen "$1" "$2" || true; fi
+}
+
+running() { systemctl --user is-active --quiet "$svc"; }
+
+report() {
+  if running; then
+    u=$(urls | paste -sd' ')
+    say "padscreen is running" "${u:-No USB link yet. Plug in the iPad and enable sharing.}"
+  else
+    say "padscreen is stopped" "Use the launcher's Start action."
+  fi
+}
+
+case "${1:-open}" in
+  open | start) running || systemctl --user start "$svc"; sleep 1; report ;;
+  stop) systemctl --user stop "$svc"; report ;;
+  restart) systemctl --user restart "$svc"; sleep 1; report ;;
+  status) report; systemctl --user --no-pager status "$svc" | head -8 || true ;;
+  *) echo "usage: padscreenctl open|start|stop|restart|status" >&2; exit 2 ;;
+esac
